@@ -48,7 +48,6 @@ namespace ECommon.Socketing
         private int _parsing;
 
         private long _pendingMessageCount;
-        private long _flowControlTimes;
 
         #endregion
 
@@ -134,7 +133,7 @@ namespace ECommon.Socketing
         }
         public void Close()
         {
-            CloseInternal(SocketError.Success, "Socket normal close.");
+            CloseInternal(SocketError.Success, "Socket normal close.", null);
         }
 
         #region Send Methods
@@ -153,7 +152,7 @@ namespace ECommon.Socketing
                 {
                     _sendingStream.Write(segment.Array, segment.Offset, segment.Count);
                 }
-                if (_sendingStream.Length >= _setting.SendBufferSize)
+                if (_sendingStream.Length >= _setting.MaxSendPacketSize)
                 {
                     break;
                 }
@@ -181,7 +180,7 @@ namespace ECommon.Socketing
             }
             catch (Exception ex)
             {
-                CloseInternal(SocketError.Shutdown, "Socket send error, errorMessage:" + ex.Message);
+                CloseInternal(SocketError.Shutdown, "Socket send error, errorMessage:" + ex.Message, ex);
                 ExitSending();
             }
         }
@@ -201,7 +200,7 @@ namespace ECommon.Socketing
             }
             else
             {
-                CloseInternal(socketArgs.SocketError, "Socket send error.");
+                CloseInternal(socketArgs.SocketError, "Socket send error.", null);
             }
         }
         private void FlowControlIfNecessary()
@@ -209,11 +208,6 @@ namespace ECommon.Socketing
             if (_flowControlThreshold > 0 && _pendingMessageCount >= _flowControlThreshold)
             {
                 Thread.Sleep(_setting.SendMessageFlowControlWaitMilliseconds);
-                var times = Interlocked.Increment(ref _flowControlTimes);
-                if (times % 1000 == 0)
-                {
-                    _logger.InfoFormat("Send message flow control times: {0}", times);
-                }
             }
         }
         private SocketAsyncEventArgs GetSendSocketEventArgs()
@@ -259,7 +253,7 @@ namespace ECommon.Socketing
             var buffer = _receiveDataBufferPool.Get();
             if (buffer == null)
             {
-                CloseInternal(SocketError.Shutdown, "Socket receive allocate buffer failed.");
+                CloseInternal(SocketError.Shutdown, "Socket receive allocate buffer failed.", null);
                 ExitReceiving();
                 return;
             }
@@ -267,7 +261,7 @@ namespace ECommon.Socketing
             _receiveSocketArgs.SetBuffer(buffer, 0, buffer.Length);
             if (_receiveSocketArgs.Buffer == null)
             {
-                CloseInternal(SocketError.Shutdown, "Socket receive set buffer failed.");
+                CloseInternal(SocketError.Shutdown, "Socket receive set buffer failed.", null);
                 ExitReceiving();
                 return;
             }
@@ -283,7 +277,7 @@ namespace ECommon.Socketing
             catch (Exception ex)
             {
                 ReturnReceivingSocketBuffer();
-                CloseInternal(SocketError.Shutdown, "Socket receive error, errorMessage:" + ex.Message);
+                CloseInternal(SocketError.Shutdown, "Socket receive error, errorMessage:" + ex.Message, ex);
                 ExitReceiving();
             }
         }
@@ -296,7 +290,7 @@ namespace ECommon.Socketing
             if (socketArgs.BytesTransferred == 0 || socketArgs.SocketError != SocketError.Success)
             {
                 ReturnReceivingSocketBuffer();
-                CloseInternal(socketArgs.SocketError, socketArgs.SocketError != SocketError.Success ? "Socket receive error" : "Socket normal close");
+                CloseInternal(socketArgs.SocketError, socketArgs.SocketError != SocketError.Success ? "Socket receive error" : "Socket normal close", null);
                 return;
             }
 
@@ -402,10 +396,14 @@ namespace ECommon.Socketing
 
         #endregion
 
-        private void CloseInternal(SocketError socketError, string reason)
+        private void CloseInternal(SocketError socketError, string reason, Exception exception)
         {
             SocketUtils.ShutdownSocket(_socket);
-            _logger.InfoFormat("Socket closed, remote endpoint:{0} socketError:{1}, reason:{2}", RemotingEndPoint, socketError, reason);
+            var isDisposedException = exception != null && exception is ObjectDisposedException;
+            if (!isDisposedException)
+            {
+                _logger.InfoFormat("Socket closed, remote endpoint:{0} socketError:{1}, reason:{2}", RemotingEndPoint, socketError, reason);
+            }
 
             if (_connectionClosedHandler != null)
             {
