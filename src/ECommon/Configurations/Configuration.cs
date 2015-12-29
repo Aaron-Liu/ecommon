@@ -4,6 +4,7 @@ using ECommon.IO;
 using ECommon.Logging;
 using ECommon.Scheduling;
 using ECommon.Serializing;
+using ECommon.Socketing.Framing;
 
 namespace ECommon.Configurations
 {
@@ -25,18 +26,18 @@ namespace ECommon.Configurations
             return Instance;
         }
 
-        public Configuration SetDefault<TService, TImplementer>(LifeStyle life = LifeStyle.Singleton)
+        public Configuration SetDefault<TService, TImplementer>(string serviceName = null, LifeStyle life = LifeStyle.Singleton)
             where TService : class
             where TImplementer : class, TService
         {
-            ObjectContainer.Register<TService, TImplementer>(life);
+            ObjectContainer.Register<TService, TImplementer>(serviceName, life);
             return this;
         }
-        public Configuration SetDefault<TService, TImplementer>(TImplementer instance)
+        public Configuration SetDefault<TService, TImplementer>(TImplementer instance, string serviceName = null)
             where TService : class
             where TImplementer : class, TService
         {
-            ObjectContainer.RegisterInstance<TService, TImplementer>(instance);
+            ObjectContainer.RegisterInstance<TService, TImplementer>(instance, serviceName);
             return this;
         }
 
@@ -45,7 +46,8 @@ namespace ECommon.Configurations
             SetDefault<ILoggerFactory, EmptyLoggerFactory>();
             SetDefault<IBinarySerializer, DefaultBinarySerializer>();
             SetDefault<IJsonSerializer, NotImplementedJsonSerializer>();
-            SetDefault<IScheduleService, ScheduleService>(LifeStyle.Transient);
+            SetDefault<IScheduleService, ScheduleService>(null, LifeStyle.Transient);
+            SetDefault<IMessageFramer, LengthPrefixMessageFramer>(null, LifeStyle.Transient);
             SetDefault<IOHelper, IOHelper>();
             return this;
         }

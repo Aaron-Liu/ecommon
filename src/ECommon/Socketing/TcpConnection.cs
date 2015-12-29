@@ -29,16 +29,15 @@ namespace ECommon.Socketing
         private readonly SocketSetting _setting;
         private readonly EndPoint _localEndPoint;
         private readonly EndPoint _remotingEndPoint;
+        private readonly SocketAsyncEventArgs _sendSocketArgs;
         private readonly SocketAsyncEventArgs _receiveSocketArgs;
         private readonly IBufferPool _receiveDataBufferPool;
         private readonly IMessageFramer _framer;
         private readonly ILogger _logger;
         private readonly ConcurrentQueue<IEnumerable<ArraySegment<byte>>> _sendingQueue = new ConcurrentQueue<IEnumerable<ArraySegment<byte>>>();
         private readonly ConcurrentQueue<ReceivedData> _receiveQueue = new ConcurrentQueue<ReceivedData>();
-        private readonly ConcurrentStack<SocketAsyncEventArgs> _sendSocketArgsStack = new ConcurrentStack<SocketAsyncEventArgs>();
         private readonly MemoryStream _sendingStream = new MemoryStream();
         private readonly object _receivingLock = new object();
-        private readonly int _flowControlThreshold;
 
         private Action<ITcpConnection, SocketError> _connectionClosedHandler;
         private Action<ITcpConnection, byte[]> _messageArrivedHandler;
@@ -46,6 +45,7 @@ namespace ECommon.Socketing
         private int _sending;
         private int _receiving;
         private int _parsing;
+        private int _closing;
 
         private long _pendingMessageCount;
 
@@ -73,6 +73,10 @@ namespace ECommon.Socketing
         {
             get { return _setting; }
         }
+        public long PendingMessageCount
+        {
+            get { return _pendingMessageCount; }
+        }
 
         #endregion
 
@@ -86,30 +90,22 @@ namespace ECommon.Socketing
 
             _socket = socket;
             _setting = setting;
-            _flowControlThreshold = _setting.SendMessageFlowControlThreshold;
             _receiveDataBufferPool = receiveDataBufferPool;
             _localEndPoint = socket.LocalEndPoint;
             _remotingEndPoint = socket.RemoteEndPoint;
             _messageArrivedHandler = messageArrivedHandler;
             _connectionClosedHandler = connectionClosedHandler;
 
-            //Initialize send socket async event args.
-            for (var i = 0; i < 2; i++)
-            {
-                var sendSocketArgs = new SocketAsyncEventArgs();
-                sendSocketArgs.AcceptSocket = _socket;
-                sendSocketArgs.Completed += OnSendAsyncCompleted;
-                _sendSocketArgsStack.Push(sendSocketArgs);
-            }
+            _sendSocketArgs = new SocketAsyncEventArgs();
+            _sendSocketArgs.AcceptSocket = _socket;
+            _sendSocketArgs.Completed += OnSendAsyncCompleted;
 
-            //Initialize receive socket async event args.
             _receiveSocketArgs = new SocketAsyncEventArgs();
             _receiveSocketArgs.AcceptSocket = socket;
             _receiveSocketArgs.Completed += OnReceiveAsyncCompleted;
 
             _logger = ObjectContainer.Resolve<ILoggerFactory>().Create(GetType().FullName);
-
-            _framer = new LengthPrefixMessageFramer();
+            _framer = ObjectContainer.Resolve<IMessageFramer>();
             _framer.RegisterMessageArrivedCallback(OnMessageArrived);
 
             TryReceive();
@@ -128,8 +124,6 @@ namespace ECommon.Socketing
             Interlocked.Increment(ref _pendingMessageCount);
 
             TrySend();
-
-            FlowControlIfNecessary();
         }
         public void Close()
         {
@@ -140,6 +134,7 @@ namespace ECommon.Socketing
 
         private void TrySend()
         {
+            if (_closing == 1) return;
             if (!EnterSending()) return;
 
             _sendingStream.SetLength(0);
@@ -170,12 +165,11 @@ namespace ECommon.Socketing
 
             try
             {
-                var sendSocktArgs = GetSendSocketEventArgs();
-                sendSocktArgs.SetBuffer(_sendingStream.GetBuffer(), 0, (int)_sendingStream.Length);
-                var firedAsync = sendSocktArgs.AcceptSocket.SendAsync(sendSocktArgs);
+                _sendSocketArgs.SetBuffer(_sendingStream.GetBuffer(), 0, (int)_sendingStream.Length);
+                var firedAsync = _sendSocketArgs.AcceptSocket.SendAsync(_sendSocketArgs);
                 if (!firedAsync)
                 {
-                    ProcessSend(sendSocktArgs);
+                    ProcessSend(_sendSocketArgs);
                 }
             }
             catch (Exception ex)
@@ -186,12 +180,12 @@ namespace ECommon.Socketing
         }
         private void ProcessSend(SocketAsyncEventArgs socketArgs)
         {
+            if (_closing == 1) return;
             if (socketArgs.Buffer != null)
             {
                 socketArgs.SetBuffer(null, 0, 0);
             }
 
-            ReturnSendSocketEventArgs(socketArgs);
             ExitSending();
 
             if (socketArgs.SocketError == SocketError.Success)
@@ -202,32 +196,6 @@ namespace ECommon.Socketing
             {
                 CloseInternal(socketArgs.SocketError, "Socket send error.", null);
             }
-        }
-        private void FlowControlIfNecessary()
-        {
-            if (_flowControlThreshold > 0 && _pendingMessageCount >= _flowControlThreshold)
-            {
-                Thread.Sleep(_setting.SendMessageFlowControlWaitMilliseconds);
-            }
-        }
-        private SocketAsyncEventArgs GetSendSocketEventArgs()
-        {
-            SocketAsyncEventArgs args;
-            if (_sendSocketArgsStack.TryPop(out args))
-            {
-                return args;
-            }
-
-            var spinWait = default(SpinWait);
-            while (!_sendSocketArgsStack.TryPop(out args))
-            {
-                spinWait.SpinOnce();
-            }
-            return args;
-        }
-        private void ReturnSendSocketEventArgs(SocketAsyncEventArgs args)
-        {
-            _sendSocketArgsStack.Push(args);
         }
         private void OnSendAsyncCompleted(object sender, SocketAsyncEventArgs e)
         {
@@ -398,22 +366,25 @@ namespace ECommon.Socketing
 
         private void CloseInternal(SocketError socketError, string reason, Exception exception)
         {
-            SocketUtils.ShutdownSocket(_socket);
-            var isDisposedException = exception != null && exception is ObjectDisposedException;
-            if (!isDisposedException)
+            if (Interlocked.CompareExchange(ref _closing, 1, 0) == 0)
             {
-                _logger.InfoFormat("Socket closed, remote endpoint:{0} socketError:{1}, reason:{2}", RemotingEndPoint, socketError, reason);
-            }
-
-            if (_connectionClosedHandler != null)
-            {
-                try
+                SocketUtils.ShutdownSocket(_socket);
+                var isDisposedException = exception != null && exception is ObjectDisposedException;
+                if (!isDisposedException)
                 {
-                    _connectionClosedHandler(this, socketError);
+                    _logger.InfoFormat("Socket closed, remote endpoint:{0} socketError:{1}, reason:{2}", RemotingEndPoint, socketError, reason);
                 }
-                catch (Exception ex)
+
+                if (_connectionClosedHandler != null)
                 {
-                    _logger.Error("Call connection closed handler failed.", ex);
+                    try
+                    {
+                        _connectionClosedHandler(this, socketError);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error("Call connection closed handler failed.", ex);
+                    }
                 }
             }
         }
