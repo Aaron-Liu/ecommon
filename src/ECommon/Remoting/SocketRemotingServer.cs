@@ -18,6 +18,11 @@ namespace ECommon.Remoting
         private readonly SocketSetting _setting;
         private bool _isShuttingdown = false;
 
+        public IBufferPool BufferPool
+        {
+            get { return _receiveDataBufferPool; }
+        }
+
         public SocketRemotingServer() : this("Server", new IPEndPoint(SocketUtils.GetLocalIPV4(), 5000)) { }
         public SocketRemotingServer(string name, IPEndPoint listeningEndPoint, SocketSetting setting = null)
         {
@@ -65,7 +70,16 @@ namespace ECommon.Remoting
                 _logger.Error(errorMessage);
                 if (remotingRequest.Type != RemotingRequestType.Oneway)
                 {
-                    requestHandlerContext.SendRemotingResponse(new RemotingResponse(remotingRequest.Code, -1, remotingRequest.Type, Encoding.UTF8.GetBytes(errorMessage), remotingRequest.Sequence));
+                    requestHandlerContext.SendRemotingResponse(new RemotingResponse(
+                        remotingRequest.Type,
+                        remotingRequest.Code,
+                        remotingRequest.Sequence,
+                        remotingRequest.CreatedTime,
+                        -1,
+                        Encoding.UTF8.GetBytes(errorMessage),
+                        DateTime.Now,
+                        remotingRequest.Header,
+                        null));
                 }
                 return;
             }
@@ -84,7 +98,16 @@ namespace ECommon.Remoting
                 _logger.Error(errorMessage, ex);
                 if (remotingRequest.Type != RemotingRequestType.Oneway)
                 {
-                    requestHandlerContext.SendRemotingResponse(new RemotingResponse(remotingRequest.Code, -1, remotingRequest.Type, Encoding.UTF8.GetBytes(ex.Message), remotingRequest.Sequence));
+                    requestHandlerContext.SendRemotingResponse(new RemotingResponse(
+                        remotingRequest.Type,
+                        remotingRequest.Code,
+                        remotingRequest.Sequence,
+                        remotingRequest.CreatedTime,
+                        -1,
+                        Encoding.UTF8.GetBytes(ex.Message),
+                        DateTime.Now,
+                        remotingRequest.Header,
+                        null));
                 }
             }
         }

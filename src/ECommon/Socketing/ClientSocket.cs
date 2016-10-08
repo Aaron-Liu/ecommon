@@ -30,11 +30,11 @@ namespace ECommon.Socketing
 
         public bool IsConnected
         {
-            get { return _socket.Connected; }
+            get { return _connection != null && _connection.IsConnected; }
         }
-        public Socket Socket
+        public TcpConnection Connection
         {
-            get { return _socket; }
+            get { return _connection; }
         }
 
         public ClientSocket(EndPoint serverEndPoint, EndPoint localEndPoint, SocketSetting setting, IBufferPool receiveDataBufferPool, Action<ITcpConnection, byte[]> messageArrivedHandler)
@@ -94,10 +94,12 @@ namespace ECommon.Socketing
             if (_connection != null)
             {
                 _connection.Close();
+                _connection = null;
             }
             else
             {
                 SocketUtils.ShutdownSocket(_socket);
+                _socket = null;
             }
             return this;
         }
@@ -120,13 +122,17 @@ namespace ECommon.Socketing
         }
         private void ProcessConnect(SocketAsyncEventArgs e)
         {
+            e.Completed -= OnConnectAsyncCompleted;
             e.AcceptSocket = null;
+            e.RemoteEndPoint = null;
+            e.Dispose();
 
             if (e.SocketError != SocketError.Success)
             {
                 SocketUtils.ShutdownSocket(_socket);
                 _logger.InfoFormat("Socket connect failed, socketError:{0}", e.SocketError);
                 OnConnectionFailed(e.SocketError);
+                _waitConnectHandle.Set();
                 return;
             }
 

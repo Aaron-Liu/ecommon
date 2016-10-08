@@ -34,14 +34,27 @@ namespace ECommon.Remoting
         private ClientSocket _clientSocket;
         private int _reconnecting = 0;
         private bool _shutteddown = false;
+        private bool _started = false;
 
         public bool IsConnected
         {
-            get { return _clientSocket.IsConnected; }
+            get { return _clientSocket != null &&_clientSocket.IsConnected; }
         }
         public EndPoint LocalEndPoint
         {
             get { return _localEndPoint; }
+        }
+        public EndPoint ServerEndPoint
+        {
+            get { return _serverEndPoint; }
+        }
+        public ClientSocket ClientSocket
+        {
+            get { return _clientSocket; }
+        }
+        public IBufferPool BufferPool
+        {
+            get { return _receiveDataBufferPool; }
         }
 
         public SocketRemotingClient() : this(new IPEndPoint(SocketUtils.GetLocalIPV4(), 5000)) { }
@@ -77,9 +90,12 @@ namespace ECommon.Remoting
         }
         public SocketRemotingClient Start()
         {
+            if (_started) return this;
+
             StartClientSocket();
             StartScanTimeoutRequestTask();
             _shutteddown = false;
+            _started = true;
             return this;
         }
         public void Shutdown()
@@ -150,7 +166,7 @@ namespace ECommon.Remoting
 
             var remotingResponse = RemotingUtil.ParseResponse(message);
 
-            if (remotingResponse.Type == RemotingRequestType.Callback)
+            if (remotingResponse.RequestType == RemotingRequestType.Callback)
             {
                 IResponseHandler responseHandler;
                 if (_responseHandlerDict.TryGetValue(remotingResponse.RequestCode, out responseHandler))
@@ -162,10 +178,10 @@ namespace ECommon.Remoting
                     _logger.ErrorFormat("No response handler found for remoting response:{0}", remotingResponse);
                 }
             }
-            else if (remotingResponse.Type == RemotingRequestType.Async)
+            else if (remotingResponse.RequestType == RemotingRequestType.Async)
             {
                 ResponseFuture responseFuture;
-                if (_responseFutureDict.TryRemove(remotingResponse.Sequence, out responseFuture))
+                if (_responseFutureDict.TryRemove(remotingResponse.RequestSequence, out responseFuture))
                 {
                     if (responseFuture.SetResponse(remotingResponse))
                     {
@@ -196,7 +212,17 @@ namespace ECommon.Remoting
                 ResponseFuture responseFuture;
                 if (_responseFutureDict.TryRemove(key, out responseFuture))
                 {
-                    responseFuture.SetResponse(new RemotingResponse(responseFuture.Request.Code, 0, responseFuture.Request.Type, TimeoutMessage, responseFuture.Request.Sequence));
+                    var request = responseFuture.Request;
+                    responseFuture.SetResponse(new RemotingResponse(
+                        request.Type,
+                        request.Code,
+                        request.Sequence,
+                        request.CreatedTime,
+                        0,
+                        TimeoutMessage,
+                        DateTime.Now,
+                        request.Header,
+                        null));
                     if (_logger.IsDebugEnabled)
                     {
                         _logger.DebugFormat("Removed timeout request:{0}", responseFuture.Request);
@@ -219,7 +245,7 @@ namespace ECommon.Remoting
                 {
                     _clientSocket.RegisterConnectionEventListener(listener);
                 }
-                _clientSocket.Start(2000);
+                _clientSocket.Start();
             }
             catch (Exception ex)
             {
@@ -237,7 +263,7 @@ namespace ECommon.Remoting
         }
         private void StartScanTimeoutRequestTask()
         {
-            _scheduleService.StartTask(string.Format("{0}.ScanTimeoutRequest", this.GetType().Name), ScanTimeoutRequest, 1000, 1000);
+            _scheduleService.StartTask(string.Format("{0}.ScanTimeoutRequest", this.GetType().Name), ScanTimeoutRequest, 1000, _setting.ScanTimeoutRequestInterval);
         }
         private void StopScanTimeoutRequestTask()
         {
@@ -245,7 +271,7 @@ namespace ECommon.Remoting
         }
         private void StartReconnectServerTask()
         {
-            _scheduleService.StartTask(string.Format("{0}.ReconnectServer", this.GetType().Name), ReconnectServer, 1000, 1000);
+            _scheduleService.StartTask(string.Format("{0}.ReconnectServer", this.GetType().Name), ReconnectServer, 1000, _setting.ReconnectToServerInterval);
         }
         private void StopReconnectServerTask()
         {
@@ -253,7 +279,7 @@ namespace ECommon.Remoting
         }
         private void EnsureClientStatus()
         {
-            if (!_clientSocket.IsConnected)
+            if (_clientSocket == null || !_clientSocket.IsConnected)
             {
                 throw new RemotingServerUnAvailableException(_serverEndPoint);
             }
